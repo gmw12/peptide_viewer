@@ -1,0 +1,1181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Peptide Sequence Viewer</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="root"></div>
+    
+    <script type="text/babel">
+        const { useState, useRef } = React;
+        
+        const Upload = ({ className, ...props }) => (
+            <svg className={className} {...props} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+        );
+        
+        const Search = ({ className, size, ...props }) => (
+            <svg className={className} {...props} width={size || 24} height={size || 24} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <path d="m21 21-4.35-4.35"></path>
+            </svg>
+        );
+        
+        const Download = ({ size, ...props }) => (
+            <svg {...props} width={size || 24} height={size || 24} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+        );
+
+        const PeptideViewer = () => {
+            const [stage, setStage] = useState('upload');
+            const [excelFile, setExcelFile] = useState(null);
+            const [fastaFile, setFastaFile] = useState(null);
+            const [excelWorkbook, setExcelWorkbook] = useState(null);
+            const [sheetNames, setSheetNames] = useState([]);
+            const [selectedSheet, setSelectedSheet] = useState('');
+            const [allColumns, setAllColumns] = useState([]);
+            const [sampleColumns, setSampleColumns] = useState([]);
+            const [progress, setProgress] = useState({ step: '', percent: 0 });
+            const [proteinData, setProteinData] = useState({});
+
+            const handleExcelUpload = (e) => {
+                const file = e.target.files[0];
+                if (file) setExcelFile(file);
+            };
+
+            const handleFastaUpload = (e) => {
+                const file = e.target.files[0];
+                if (file) setFastaFile(file);
+            };
+
+            const processFiles = async () => {
+                if (!excelFile || !fastaFile) {
+                    alert('Please upload both Excel and FASTA files');
+                    return;
+                }
+
+                setStage('processing');
+                setProgress({ step: 'Reading Excel file...', percent: 10 });
+                
+                try {
+                    const workbook = await loadExcelWorkbook(excelFile);
+                    
+                    if (workbook.SheetNames.length > 1) {
+                        setExcelWorkbook(workbook);
+                        setSheetNames(workbook.SheetNames);
+                        setSelectedSheet(workbook.SheetNames[0]);
+                        setStage('sheetSelection');
+                        return;
+                    }
+                    
+                    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const jsonData = XLSX.utils.sheet_to_json(worksheet);
+                    
+                    if (jsonData.length === 0) {
+                        alert('Excel sheet is empty');
+                        setStage('upload');
+                        return;
+                    }
+                    
+                    const columns = Object.keys(jsonData[0]);
+                    const potentialSampleColumns = filterSampleColumns(columns);
+                    
+                    setExcelWorkbook(workbook);
+                    setSelectedSheet(workbook.SheetNames[0]);
+                    setAllColumns(potentialSampleColumns);
+                    setSampleColumns(potentialSampleColumns);
+                    setStage('sampleSelection');
+                    
+                } catch (error) {
+                    console.error('Error processing files:', error);
+                    alert('Error processing files: ' + error.message);
+                    setStage('upload');
+                }
+            };
+
+            const continueWithSelectedSheet = () => {
+                try {
+                    const worksheet = excelWorkbook.Sheets[selectedSheet];
+                    const jsonData = XLSX.utils.sheet_to_json(worksheet);
+                    
+                    if (jsonData.length === 0) {
+                        alert('Selected sheet is empty');
+                        setStage('sheetSelection');
+                        return;
+                    }
+                    
+                    const columns = Object.keys(jsonData[0]);
+                    const potentialSampleColumns = filterSampleColumns(columns);
+                    
+                    setAllColumns(potentialSampleColumns);
+                    setSampleColumns(potentialSampleColumns);
+                    setStage('sampleSelection');
+                    
+                } catch (error) {
+                    console.error('Error reading sheet:', error);
+                    alert('Error reading sheet: ' + error.message);
+                }
+            };
+
+            const filterSampleColumns = (columns) => {
+                const nonSampleColumns = [
+                    'accession', 'description', 'name', 'genes', 'sequence', 
+                    'peptideposition', 'precursors', 'detected_imputed'
+                ];
+                
+                return columns.filter(col => 
+                    !nonSampleColumns.some(nonSample => 
+                        col.toLowerCase().includes(nonSample.toLowerCase())
+                    )
+                );
+            };
+
+            const continueWithSamples = async () => {
+                if (sampleColumns.length === 0) {
+                    alert('Please select at least one sample column');
+                    return;
+                }
+                
+                setStage('processing');
+                
+                try {
+                    setProgress({ step: 'Parsing Excel file...', percent: 20 });
+                    const peptideData = parseExcelSheet(excelWorkbook, selectedSheet);
+                    
+                    setProgress({ step: 'Parsing FASTA file...', percent: 40 });
+                    const fastaData = await parseFasta(fastaFile);
+                    
+                    setProgress({ step: 'Matching peptides to proteins...', percent: 60 });
+                    const matchedData = matchPeptidesToProteins(peptideData, fastaData, sampleColumns);
+                    
+                    setProgress({ step: 'Calculating coverage...', percent: 80 });
+                    const finalData = calculateCoverage(matchedData);
+                    
+                    setProgress({ step: 'Ready!', percent: 100 });
+                    setProteinData(finalData);
+                    
+                    setTimeout(() => setStage('viewer'), 500);
+                } catch (error) {
+                    console.error('Error processing files:', error);
+                    alert('Error processing files: ' + error.message);
+                    setStage('upload');
+                }
+            };
+
+            const toggleSampleColumn = (column) => {
+                if (sampleColumns.includes(column)) {
+                    setSampleColumns(sampleColumns.filter(c => c !== column));
+                } else {
+                    setSampleColumns([...sampleColumns, column]);
+                }
+            };
+
+            const loadExcelWorkbook = async (file) => {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const data = new Uint8Array(e.target.result);
+                            const workbook = XLSX.read(data, { type: 'array' });
+                            resolve(workbook);
+                        } catch (error) {
+                            reject(error);
+                        }
+                    };
+                    reader.onerror = reject;
+                    reader.readAsArrayBuffer(file);
+                });
+            };
+
+            const parseExcelSheet = (workbook, sheetName) => {
+                const worksheet = workbook.Sheets[sheetName];
+                const jsonData = XLSX.utils.sheet_to_json(worksheet);
+                console.log('Excel parsed:', jsonData.length, 'rows from sheet:', sheetName);
+                return jsonData;
+            };
+
+            const parseFasta = async (file) => {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const text = e.target.result;
+                            const proteins = {};
+                            const lines = text.split('\n');
+                            
+                            let currentProtein = null;
+                            let currentSequence = '';
+                            
+                            for (let line of lines) {
+                                line = line.trim();
+                                if (line.startsWith('>')) {
+                                    if (currentProtein) {
+                                        proteins[currentProtein.accession] = {
+                                            ...currentProtein,
+                                            sequence: currentSequence.replace(/\s/g, '')
+                                        };
+                                    }
+                                    
+                                    const match = line.match(/^>([A-Z0-9]+)\|([A-Z0-9_]+)\s+(.+?)(?:\s+OS=|$)/);
+                                    if (match) {
+                                        currentProtein = {
+                                            accession: match[1],
+                                            name: match[2],
+                                            description: match[3]
+                                        };
+                                        currentSequence = '';
+                                    }
+                                } else if (line && currentProtein) {
+                                    currentSequence += line;
+                                }
+                            }
+                            
+                            if (currentProtein) {
+                                proteins[currentProtein.accession] = {
+                                    ...currentProtein,
+                                    sequence: currentSequence.replace(/\s/g, '')
+                                };
+                            }
+                            
+                            console.log('FASTA parsed:', Object.keys(proteins).length, 'proteins');
+                            resolve(proteins);
+                        } catch (error) {
+                            reject(error);
+                        }
+                    };
+                    reader.onerror = reject;
+                    reader.readAsText(file);
+                });
+            };
+
+            const stripModifications = (seq) => {
+                return seq.replace(/\[.*?\]/g, '').replace(/[\*_]/g, '');
+            };
+
+            const findModifications = (peptideSeq, startPos) => {
+                const modifications = [];
+                let cleanPos = 0;
+                let i = 0;
+                
+                while (i < peptideSeq.length) {
+                    const char = peptideSeq[i];
+                    
+                    if (char === '*' || char === '_') {
+                        i++;
+                    } else if (char === '[') {
+                        const endBracket = peptideSeq.indexOf(']', i);
+                        const mod = peptideSeq.substring(i + 1, endBracket);
+                        const modifiedResidue = peptideSeq[i - 1];
+                        const proteinPosition = startPos + cleanPos - 1;
+                        
+                        modifications.push({
+                            position: proteinPosition,
+                            residue: modifiedResidue,
+                            modification: mod
+                        });
+                        i = endBracket + 1;
+                    } else {
+                        cleanPos++;
+                        i++;
+                    }
+                }
+                
+                return modifications;
+            };
+
+            const matchPeptidesToProteins = (peptideData, fastaData, sampleCols) => {
+                const matched = {};
+                
+                for (const row of peptideData) {
+                    const accession = row.Accession;
+                    if (!fastaData[accession]) {
+                        console.warn('Protein not found in FASTA:', accession);
+                        continue;
+                    }
+                    
+                    if (!matched[accession]) {
+                        matched[accession] = {
+                            ...fastaData[accession],
+                            length: fastaData[accession].sequence.length,
+                            peptides: [],
+                            sampleIntensities: {}
+                        };
+                        
+                        sampleCols.forEach(col => {
+                            matched[accession].sampleIntensities[col] = 0;
+                        });
+                    }
+                    
+                    const cleanSeq = stripModifications(row.Sequence);
+                    const startPos = Number(row.PeptidePosition);
+                    const modifications = findModifications(row.Sequence, startPos);
+                    
+                    const peptideSampleIntensities = {};
+                    sampleCols.forEach(col => {
+                        peptideSampleIntensities[col] = Number(row[col]) || 0;
+                    });
+                    
+                    matched[accession].peptides.push({
+                        sequence: cleanSeq,
+                        originalSequence: row.Sequence,
+                        position: startPos,
+                        endPosition: startPos + cleanSeq.length - 1,
+                        modifications: modifications,
+                        sampleIntensities: peptideSampleIntensities
+                    });
+                    
+                    sampleCols.forEach(col => {
+                        const value = Number(row[col]) || 0;
+                        matched[accession].sampleIntensities[col] += value;
+                    });
+                }
+                
+                return matched;
+            };
+
+            const calculateCoverage = (proteinData) => {
+                for (const accession in proteinData) {
+                    const protein = proteinData[accession];
+                    const covered = new Set();
+                    
+                    for (const peptide of protein.peptides) {
+                        for (let i = peptide.position; i <= peptide.endPosition; i++) {
+                            covered.add(i);
+                        }
+                    }
+                    
+                    const coveragePercent = (covered.size / protein.length) * 100;
+                    protein.coverage = coveragePercent.toFixed(1);
+                }
+                
+                return proteinData;
+            };
+
+            const handleNewAnalysis = () => {
+                setStage('upload');
+                setExcelFile(null);
+                setFastaFile(null);
+                setExcelWorkbook(null);
+                setSheetNames([]);
+                setSelectedSheet('');
+                setAllColumns([]);
+                setSampleColumns([]);
+                setProteinData({});
+            };
+
+            if (stage === 'upload') {
+                return (
+                    <div className="min-h-screen bg-gray-50 p-8">
+                        <div className="max-w-2xl mx-auto">
+                            <h1 className="text-3xl font-bold text-gray-800 mb-8 text-center">
+                                Peptide Sequence Viewer
+                            </h1>
+                            
+                            <div className="bg-white rounded-lg shadow-lg p-8 space-y-6">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                        Excel File (Peptide Data)
+                                    </label>
+                                    <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-blue-400 transition">
+                                        <Upload className="mx-auto h-12 w-12 text-gray-400 mb-2" />
+                                        <input
+                                            type="file"
+                                            accept=".xlsx,.xls"
+                                            onChange={handleExcelUpload}
+                                            className="hidden"
+                                            id="excel-upload"
+                                        />
+                                        <label htmlFor="excel-upload" className="cursor-pointer">
+                                            <span className="text-blue-600 hover:text-blue-700 font-medium">
+                                                Click to upload
+                                            </span>
+                                            <span className="text-gray-500"> or drag and drop</span>
+                                        </label>
+                                        {excelFile && (
+                                            <p className="mt-2 text-sm text-green-600">
+                                                ✓ {excelFile.name}
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                        FASTA File (Protein Sequences)
+                                    </label>
+                                    <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-blue-400 transition">
+                                        <Upload className="mx-auto h-12 w-12 text-gray-400 mb-2" />
+                                        <input
+                                            type="file"
+                                            accept=".fasta,.fa,.faa"
+                                            onChange={handleFastaUpload}
+                                            className="hidden"
+                                            id="fasta-upload"
+                                        />
+                                        <label htmlFor="fasta-upload" className="cursor-pointer">
+                                            <span className="text-blue-600 hover:text-blue-700 font-medium">
+                                                Click to upload
+                                            </span>
+                                            <span className="text-gray-500"> or drag and drop</span>
+                                        </label>
+                                        {fastaFile && (
+                                            <p className="mt-2 text-sm text-green-600">
+                                                ✓ {fastaFile.name}
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <button
+                                    onClick={processFiles}
+                                    disabled={!excelFile || !fastaFile}
+                                    className={`w-full py-3 px-4 rounded-lg font-medium text-white transition
+                                        ${excelFile && fastaFile 
+                                            ? 'bg-blue-600 hover:bg-blue-700 cursor-pointer' 
+                                            : 'bg-gray-300 cursor-not-allowed'}`}
+                                >
+                                    Process Files
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (stage === 'sheetSelection') {
+                return (
+                    <div className="min-h-screen bg-gray-50 p-8">
+                        <div className="max-w-2xl mx-auto">
+                            <h1 className="text-3xl font-bold text-gray-800 mb-8 text-center">
+                                Select Worksheet
+                            </h1>
+                            
+                            <div className="bg-white rounded-lg shadow-lg p-8 space-y-6">
+                                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+                                    <p className="text-sm text-blue-800">
+                                        Your Excel file contains multiple worksheets. Please select which sheet contains your peptide data.
+                                    </p>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                        Worksheet
+                                    </label>
+                                    <select
+                                        value={selectedSheet}
+                                        onChange={(e) => setSelectedSheet(e.target.value)}
+                                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    >
+                                        {sheetNames.map((name) => (
+                                            <option key={name} value={name}>
+                                                {name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <div className="flex gap-4">
+                                    <button
+                                        onClick={() => setStage('upload')}
+                                        className="flex-1 py-3 px-4 rounded-lg font-medium text-gray-700 bg-gray-200 hover:bg-gray-300"
+                                    >
+                                        Back
+                                    </button>
+                                    <button
+                                        onClick={continueWithSelectedSheet}
+                                        className="flex-1 py-3 px-4 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700"
+                                    >
+                                        Continue
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (stage === 'sampleSelection') {
+                return (
+                    <div className="min-h-screen bg-gray-50 p-8">
+                        <div className="max-w-3xl mx-auto">
+                            <h1 className="text-3xl font-bold text-gray-800 mb-8 text-center">
+                                Select Sample Columns
+                            </h1>
+                            
+                            <div className="bg-white rounded-lg shadow-lg p-8 space-y-6">
+                                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+                                    <p className="text-sm text-blue-800">
+                                        Select which columns contain sample intensity data. These will be used to calculate protein-level intensities.
+                                    </p>
+                                </div>
+
+                                <div>
+                                    <div className="flex justify-between items-center mb-3">
+                                        <label className="block text-sm font-medium text-gray-700">
+                                            Sample Columns ({sampleColumns.length} selected)
+                                        </label>
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={() => setSampleColumns(allColumns)}
+                                                className="text-xs px-3 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                                            >
+                                                Select All
+                                            </button>
+                                            <button
+                                                onClick={() => setSampleColumns([])}
+                                                className="text-xs px-3 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                                            >
+                                                Clear All
+                                            </button>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="border border-gray-300 rounded-lg p-4 max-h-96 overflow-y-auto">
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {allColumns.map((col) => (
+                                                <label
+                                                    key={col}
+                                                    className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded cursor-pointer"
+                                                >
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={sampleColumns.includes(col)}
+                                                        onChange={() => toggleSampleColumn(col)}
+                                                        className="w-4 h-4 text-blue-600"
+                                                    />
+                                                    <span className="text-sm text-gray-700">{col}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="flex gap-4">
+                                    <button
+                                        onClick={() => setStage(sheetNames.length > 1 ? 'sheetSelection' : 'upload')}
+                                        className="flex-1 py-3 px-4 rounded-lg font-medium text-gray-700 bg-gray-200 hover:bg-gray-300"
+                                    >
+                                        Back
+                                    </button>
+                                    <button
+                                        onClick={continueWithSamples}
+                                        disabled={sampleColumns.length === 0}
+                                        className={`flex-1 py-3 px-4 rounded-lg font-medium text-white ${
+                                            sampleColumns.length > 0
+                                                ? 'bg-blue-600 hover:bg-blue-700'
+                                                : 'bg-gray-400 cursor-not-allowed'
+                                        }`}
+                                    >
+                                        Continue
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (stage === 'processing') {
+                return (
+                    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+                        <div className="bg-white rounded-lg shadow-lg p-8 max-w-md w-full">
+                            <h2 className="text-xl font-bold text-gray-800 mb-4">
+                                Processing files...
+                            </h2>
+                            <div className="space-y-4">
+                                <div className="w-full bg-gray-200 rounded-full h-4">
+                                    <div 
+                                        className="bg-blue-600 h-4 rounded-full transition-all duration-300"
+                                        style={{ width: `${progress.percent}%` }}
+                                    />
+                                </div>
+                                <p className="text-sm text-gray-600">{progress.step}</p>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen bg-gray-50 p-4">
+                    <div className="max-w-7xl mx-auto">
+                        <div className="bg-white rounded-lg shadow-lg p-6">
+                            <div className="flex justify-between items-center mb-6">
+                                <h1 className="text-2xl font-bold text-gray-800">
+                                    Peptide Sequence Viewer
+                                </h1>
+                                <button 
+                                    onClick={handleNewAnalysis}
+                                    className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
+                                    New Analysis
+                                </button>
+                            </div>
+
+                            <ViewerTabs proteinData={proteinData} sampleColumns={sampleColumns} />
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const ViewerTabs = ({ proteinData, sampleColumns }) => {
+            const [activeTab, setActiveTab] = useState('viewer');
+            const [selectedProtein, setSelectedProtein] = useState(null);
+            const [searchQuery, setSearchQuery] = useState('');
+            const [searchResults, setSearchResults] = useState([]);
+            const [showDropdown, setShowDropdown] = useState(false);
+
+            const handleSearch = (query) => {
+                setSearchQuery(query);
+                
+                if (!query.trim()) {
+                    setSearchResults([]);
+                    setShowDropdown(false);
+                    return;
+                }
+                
+                const lowerQuery = query.toLowerCase();
+                const results = Object.values(proteinData).filter(protein => 
+                    protein.accession.toLowerCase().includes(lowerQuery) ||
+                    protein.name.toLowerCase().includes(lowerQuery) ||
+                    (protein.description && protein.description.toLowerCase().includes(lowerQuery))
+                );
+                
+                setSearchResults(results);
+                setShowDropdown(results.length > 0);
+            };
+
+            const selectProtein = (protein) => {
+                setSelectedProtein(protein);
+                setSearchQuery(protein.name);
+                setShowDropdown(false);
+            };
+
+            const selectProteinAndSwitchTab = (protein) => {
+                setSelectedProtein(protein);
+                setSearchQuery(protein.name);
+                setActiveTab('viewer');
+            };
+
+            return (
+                <div>
+                    <div className="border-b border-gray-200 mb-6">
+                        <div className="flex gap-4">
+                            <button
+                                onClick={() => setActiveTab('viewer')}
+                                className={`px-4 py-2 font-medium border-b-2 transition ${
+                                    activeTab === 'viewer'
+                                        ? 'border-blue-600 text-blue-600'
+                                        : 'border-transparent text-gray-600 hover:text-gray-800'
+                                }`}
+                            >
+                                Protein Viewer
+                            </button>
+                            <button
+                                onClick={() => setActiveTab('intensities')}
+                                className={`px-4 py-2 font-medium border-b-2 transition ${
+                                    activeTab === 'intensities'
+                                        ? 'border-blue-600 text-blue-600'
+                                        : 'border-transparent text-gray-600 hover:text-gray-800'
+                                }`}
+                            >
+                                Protein Intensities
+                            </button>
+                        </div>
+                    </div>
+
+                    {activeTab === 'viewer' && (
+                        <div>
+                            <div className="relative mb-6">
+                                <div className="flex items-center">
+                                    <Search className="absolute left-3 text-gray-400" size={20} />
+                                    <input
+                                        type="text"
+                                        value={searchQuery}
+                                        onChange={(e) => handleSearch(e.target.value)}
+                                        onFocus={() => searchResults.length > 0 && setShowDropdown(true)}
+                                        placeholder="Search proteins by name, accession, or description..."
+                                        className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                                
+                                {showDropdown && (
+                                    <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-64 overflow-y-auto">
+                                        {searchResults.map((protein) => (
+                                            <div
+                                                key={protein.accession}
+                                                onClick={() => selectProtein(protein)}
+                                                className="px-4 py-3 hover:bg-blue-50 cursor-pointer border-b last:border-b-0"
+                                            >
+                                                <div className="font-medium text-gray-800">{protein.name}</div>
+                                                <div className="text-sm text-gray-600">
+                                                    {protein.accession} | {protein.peptides.length} peptides | {protein.coverage}% coverage
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            {selectedProtein ? (
+                                <ProteinView protein={selectedProtein} sampleColumns={sampleColumns} />
+                            ) : (
+                                <div className="text-center py-12 text-gray-500">
+                                    <p className="text-lg">Search and select a protein to view its sequence</p>
+                                    <p className="text-sm mt-2">
+                                        {Object.keys(proteinData).length} proteins available
+                                    </p>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {activeTab === 'intensities' && (
+                        <ProteinIntensitiesTable 
+                            proteinData={proteinData} 
+                            sampleColumns={sampleColumns}
+                            onSelectProtein={selectProteinAndSwitchTab}
+                        />
+                    )}
+                </div>
+            );
+        };
+
+        const ProteinView = ({ protein, sampleColumns }) => {
+            const sequenceOnlyRef = useRef(null);
+            const [isExporting, setIsExporting] = useState(false);
+            const [useGrayscale, setUseGrayscale] = useState(false);
+            const [selectedSample, setSelectedSample] = useState('all');
+            
+            const peptideColors = useGrayscale ? [
+                '#E0E0E0', '#E0E0E0', '#E0E0E0', '#E0E0E0',
+                '#E0E0E0', '#E0E0E0', '#E0E0E0', '#E0E0E0'
+            ] : [
+                '#B3D9FF', '#B3FFB3', '#FFFFB3', '#FFB3E6',
+                '#E6B3FF', '#B3FFFF', '#FFD9B3', '#D9FFB3'
+            ];
+            
+            const modifiedColor = '#FFB366';
+            
+            const displayedPeptides = selectedSample === 'all' 
+                ? protein.peptides 
+                : protein.peptides.filter(p => (p.sampleIntensities[selectedSample] || 0) > 0);
+
+            const calculateDisplayedCoverage = () => {
+                const covered = new Set();
+                for (const peptide of displayedPeptides) {
+                    for (let i = peptide.position; i <= peptide.endPosition; i++) {
+                        covered.add(i);
+                    }
+                }
+                return ((covered.size / protein.length) * 100).toFixed(1);
+            };
+
+            const displayedCoverage = calculateDisplayedCoverage();
+            
+            const exportAsImage = async () => {
+                setIsExporting(true);
+                
+                try {
+                    if (!window.html2canvas) {
+                        const script = document.createElement('script');
+                        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+                        script.onload = () => captureAndDownload();
+                        script.onerror = () => {
+                            alert('Failed to load export library. Please check your internet connection.');
+                            setIsExporting(false);
+                        };
+                        document.head.appendChild(script);
+                    } else {
+                        captureAndDownload();
+                    }
+                } catch (error) {
+                    console.error('Error in exportAsImage:', error);
+                    alert('Error exporting image: ' + error.message);
+                    setIsExporting(false);
+                }
+            };
+
+            const captureAndDownload = () => {
+                const element = sequenceOnlyRef.current;
+                
+                if (!element) {
+                    alert('Error: Could not find element to export');
+                    setIsExporting(false);
+                    return;
+                }
+                
+                window.html2canvas(element, {
+                    backgroundColor: '#ffffff',
+                    scale: 2,
+                    logging: false,
+                    useCORS: true
+                }).then(canvas => {
+                    canvas.toBlob((blob) => {
+                        const url = URL.createObjectURL(blob);
+                        const link = document.createElement('a');
+                        link.download = `${protein.name}_sequence.png`;
+                        link.href = url;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        
+                        setTimeout(() => {
+                            URL.revokeObjectURL(url);
+                        }, 100);
+                        
+                        setIsExporting(false);
+                    }, 'image/png');
+                }).catch(error => {
+                    console.error('Error in html2canvas:', error);
+                    alert('Error capturing image: ' + error.message);
+                    setIsExporting(false);
+                });
+            };
+
+            const getPositionInfo = (pos) => {
+                const coveringPeptides = displayedPeptides.filter(p => 
+                    pos >= p.position && pos <= p.endPosition
+                );
+                
+                const modifications = displayedPeptides
+                    .flatMap(p => p.modifications)
+                    .filter(m => m.position === pos);
+                
+                return { coveringPeptides, modifications };
+            };
+
+            const darkenColor = (color, percent) => {
+                const num = parseInt(color.replace('#', ''), 16);
+                const amt = Math.round(2.55 * percent);
+                const R = (num >> 16) - amt;
+                const G = (num >> 8 & 0x00FF) - amt;
+                const B = (num & 0x0000FF) - amt;
+                return '#' + (0x1000000 + (R < 255 ? R < 1 ? 0 : R : 255) * 0x10000 +
+                    (G < 255 ? G < 1 ? 0 : G : 255) * 0x100 +
+                    (B < 255 ? B < 1 ? 0 : B : 255))
+                    .toString(16).slice(1);
+            };
+
+            const renderSequence = () => {
+                const seq = protein.sequence;
+                
+                return (
+                    <div className="font-mono text-sm leading-relaxed break-all">
+                        {seq.split('').map((aa, idx) => {
+                            const globalPos = idx + 1;
+                            const { coveringPeptides, modifications } = getPositionInfo(globalPos);
+                            
+                            let bgColor = 'transparent';
+                            let tooltipText = '';
+                            
+                            if (modifications.length > 0) {
+                                bgColor = modifiedColor;
+                                tooltipText = `${aa} (pos ${globalPos}) - ${modifications.map(m => m.modification).join(', ')}`;
+                            } else if (coveringPeptides.length > 0) {
+                                const colorIdx = displayedPeptides.indexOf(coveringPeptides[0]) % peptideColors.length;
+                                bgColor = peptideColors[colorIdx];
+                                
+                                if (coveringPeptides.length > 1) {
+                                    bgColor = darkenColor(bgColor, 30);
+                                }
+                                
+                                tooltipText = `Peptide: ${coveringPeptides[0].sequence} (pos ${coveringPeptides[0].position}-${coveringPeptides[0].endPosition})`;
+                            }
+                            
+                            return (
+                                <span
+                                    key={idx}
+                                    className="inline-block"
+                                    style={{ backgroundColor: bgColor }}
+                                    title={tooltipText}
+                                >
+                                    {aa}
+                                </span>
+                            );
+                        })}
+                    </div>
+                );
+            };
+
+            return (
+                <div>
+                    {displayedPeptides.length === 0 && selectedSample !== 'all' && (
+                        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
+                            <p className="text-yellow-800">
+                                No peptides identified in sample <strong>{selectedSample}</strong> for this protein.
+                            </p>
+                        </div>
+                    )}
+                    
+                    <div className="flex justify-between items-center mb-4">
+                        <div className="flex items-center gap-3">
+                            <label className="text-sm font-medium text-gray-700">Sample View:</label>
+                            <select
+                                value={selectedSample}
+                                onChange={(e) => setSelectedSample(e.target.value)}
+                                className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            >
+                                <option value="all">All Samples</option>
+                                {sampleColumns.map(col => (
+                                    <option key={col} value={col}>{col}</option>
+                                ))}
+                            </select>
+                        </div>
+                        
+                        <div className="flex gap-3">
+                            <button
+                                onClick={() => setUseGrayscale(!useGrayscale)}
+                                className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+                            >
+                                {useGrayscale ? 'Use Colors' : 'Use Grayscale'}
+                            </button>
+                            <button
+                                onClick={exportAsImage}
+                                disabled={isExporting}
+                                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                            >
+                                <Download size={18} />
+                                {isExporting ? 'Exporting...' : 'Export as Image'}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div ref={sequenceOnlyRef} className="bg-white p-6">
+                        <div className="bg-blue-50 rounded-lg p-4 mb-6">
+                            <h2 className="text-xl font-bold text-gray-800 mb-2">
+                                {protein.name} - {protein.description}
+                            </h2>
+                            <div className="flex gap-6 text-sm text-gray-700">
+                                <span>Accession: <strong>{protein.accession}</strong></span>
+                                <span>Length: <strong>{protein.length} AA</strong></span>
+                                <span>Peptides: <strong>{displayedPeptides.length}</strong></span>
+                                <span>Coverage: <strong>{displayedCoverage}%</strong></span>
+                            </div>
+                        </div>
+
+                        <div className="bg-gray-50 rounded-lg p-4 mb-6 overflow-x-auto">
+                            <h3 className="text-sm font-medium text-gray-700 mb-3">Sequence:</h3>
+                            {renderSequence()}
+                        </div>
+
+                        <div className="flex items-center gap-6 text-sm mb-6">
+                            <span className="text-gray-700 font-medium">Legend:</span>
+                            <div className="flex items-center gap-2">
+                                <div className="w-4 h-4" style={{ backgroundColor: modifiedColor }} />
+                                <span>Modified residue</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="border rounded-lg overflow-hidden mt-6">
+                        <h3 className="bg-gray-100 px-4 py-2 font-medium text-gray-800">
+                            Identified Peptides ({displayedPeptides.length})
+                        </h3>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                                <thead className="bg-gray-50">
+                                    <tr>
+                                        <th className="px-4 py-2 text-left">Position</th>
+                                        <th className="px-4 py-2 text-left">Sequence</th>
+                                        <th className="px-4 py-2 text-left">Modifications</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {displayedPeptides.map((peptide, idx) => (
+                                        <tr key={idx} className="border-t hover:bg-gray-50">
+                                            <td className="px-4 py-2">{peptide.position}-{peptide.endPosition}</td>
+                                            <td className="px-4 py-2 font-mono">{peptide.sequence}</td>
+                                            <td className="px-4 py-2">
+                                                {peptide.modifications.length > 0 ? (
+                                                    peptide.modifications.map((mod, i) => (
+                                                        <span key={i} className="text-xs bg-orange-100 px-2 py-1 rounded mr-1">
+                                                            {mod.residue}{mod.position}[{mod.modification}]
+                                                        </span>
+                                                    ))
+                                                ) : (
+                                                    <span className="text-gray-400">None</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const ProteinIntensitiesTable = ({ proteinData, sampleColumns, onSelectProtein }) => {
+            const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+            
+            const proteins = Object.values(proteinData);
+            
+            const sortedProteins = [...proteins].sort((a, b) => {
+                if (!sortConfig.key) return 0;
+                
+                let aValue, bValue;
+                
+                if (sortConfig.key === 'name') {
+                    aValue = a.name;
+                    bValue = b.name;
+                } else if (sortConfig.key === 'accession') {
+                    aValue = a.accession;
+                    bValue = b.accession;
+                } else if (sortConfig.key === 'description') {
+                    aValue = a.description;
+                    bValue = b.description;
+                } else if (sortConfig.key === 'peptideCount') {
+                    aValue = a.peptides.length;
+                    bValue = b.peptides.length;
+                } else if (sortConfig.key === 'coverage') {
+                    aValue = parseFloat(a.coverage);
+                    bValue = parseFloat(b.coverage);
+                } else {
+                    aValue = a.sampleIntensities[sortConfig.key] || 0;
+                    bValue = b.sampleIntensities[sortConfig.key] || 0;
+                }
+                
+                if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+                if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
+                return 0;
+            });
+            
+            const requestSort = (key) => {
+                let direction = 'asc';
+                if (sortConfig.key === key && sortConfig.direction === 'asc') {
+                    direction = 'desc';
+                }
+                setSortConfig({ key, direction });
+            };
+            
+            const getSortIcon = (columnKey) => {
+                if (sortConfig.key !== columnKey) return '⇅';
+                return sortConfig.direction === 'asc' ? '↑' : '↓';
+            };
+            
+            return (
+                <div>
+                    <h2 className="text-xl font-bold text-gray-800 mb-4">
+                        Protein Intensities
+                    </h2>
+                    
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+                        <p className="text-sm text-blue-800">
+                            Showing protein-level intensities (sum of all peptide intensities per protein). 
+                            Click on a protein name to view its sequence in the Protein Viewer tab.
+                        </p>
+                    </div>
+                    
+                    <div className="border rounded-lg overflow-hidden" style={{ maxHeight: '600px', maxWidth: '100%' }}>
+                        <div className="overflow-auto" style={{ maxHeight: '600px' }}>
+                            <table className="w-full text-sm">
+                                <thead className="bg-gray-100 sticky top-0 z-10">
+                                    <tr>
+                                        <th 
+                                            className="px-4 py-3 text-left font-medium cursor-pointer hover:bg-gray-200 sticky left-0 bg-gray-100 z-20"
+                                            onClick={() => requestSort('accession')}
+                                        >
+                                            Accession {getSortIcon('accession')}
+                                        </th>
+                                        <th 
+                                            className="px-4 py-3 text-left font-medium cursor-pointer hover:bg-gray-200"
+                                            onClick={() => requestSort('name')}
+                                        >
+                                            Name {getSortIcon('name')}
+                                        </th>
+                                        <th 
+                                            className="px-4 py-3 text-left font-medium cursor-pointer hover:bg-gray-200"
+                                            onClick={() => requestSort('description')}
+                                        >
+                                            Description {getSortIcon('description')}
+                                        </th>
+                                        <th 
+                                            className="px-4 py-3 text-left font-medium cursor-pointer hover:bg-gray-200"
+                                            onClick={() => requestSort('peptideCount')}
+                                        >
+                                            # Peptides {getSortIcon('peptideCount')}
+                                        </th>
+                                        <th 
+                                            className="px-4 py-3 text-left font-medium cursor-pointer hover:bg-gray-200"
+                                            onClick={() => requestSort('coverage')}
+                                        >
+                                            Coverage % {getSortIcon('coverage')}
+                                        </th>
+                                        {sampleColumns.map(col => (
+                                            <th 
+                                                key={col}
+                                                className="px-2 py-3 text-center font-medium cursor-pointer hover:bg-gray-200"
+                                                onClick={() => requestSort(col)}
+                                                style={{ minWidth: '60px' }}
+                                            >
+                                                <div className="flex flex-col items-center justify-end" style={{ height: '120px' }}>
+                                                    <div 
+                                                        className="whitespace-nowrap text-xs"
+                                                        style={{ 
+                                                            writingMode: 'vertical-rl',
+                                                            transform: 'rotate(180deg)',
+                                                            transformOrigin: 'center'
+                                                        }}
+                                                    >
+                                                        {col} {getSortIcon(col)}
+                                                    </div>
+                                                </div>
+                                            </th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {sortedProteins.map((protein) => (
+                                        <tr key={protein.accession} className="border-t hover:bg-gray-50">
+                                            <td className="px-4 py-3 font-mono text-xs sticky left-0 bg-white hover:bg-gray-50">{protein.accession}</td>
+                                            <td className="px-4 py-3">
+                                                <button
+                                                    onClick={() => onSelectProtein(protein)}
+                                                    className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                                                >
+                                                    {protein.name}
+                                                </button>
+                                            </td>
+                                            <td className="px-4 py-3 text-gray-600 max-w-xs truncate" title={protein.description}>
+                                                {protein.description}
+                                            </td>
+                                            <td className="px-4 py-3 text-center">{protein.peptides.length}</td>
+                                            <td className="px-4 py-3 text-center">{protein.coverage}</td>
+                                            {sampleColumns.map(col => (
+                                                <td key={col} className="px-2 py-3 text-right font-mono text-xs">
+                                                    {(protein.sampleIntensities[col] || 0).toFixed(1)}
+                                                </td>
+                                            ))}
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <div className="mt-4 text-sm text-gray-600">
+                        Showing {sortedProteins.length} proteins
+                    </div>
+                </div>
+            );
+        };
+
+        ReactDOM.render(<PeptideViewer />, document.getElementById('root'));
+    </script>
+</body>
+</html>
